@@ -79,13 +79,22 @@ This is the home for everything Vercel can't run:
 ## 5. Security Boundaries
 
 - Vercel tier never holds long-lived secrets for third-party AI providers beyond what's needed for the request; orchestration secrets live on the worker tier and are not exposed to the browser under any path.
-- Worker tier reaches Supabase via service-role key, scoped to job-specific least-privilege Postgres roles where feasible.
-- All inter-tier calls (Vercel → Worker) authenticated via short-lived signed internal tokens, not shared static secrets.
+- Worker tier reaches Supabase via job-specific least-privilege Postgres roles, not the service-role key, per the resolved decision in DATABASE_ARCHITECTURE.md §2.
+
+### Resolved decision — Internal Vercel ↔ VPS authentication
+
+**Final decision: short-lived signed JWTs issued by a minimal internal token-issuing service, layered over mTLS at the transport level.**
+
+- A lightweight internal auth component (runs on the VPS, not Vercel) issues JWTs with a 60-second TTL, signed with an asymmetric key pair (private key on the issuer, public key distributed to verifiers). Claims include `job_type`, `org_id` (where applicable), and `iat`/`exp`.
+- Every request from Vercel to the VPS worker tier (e.g. triggering a synchronous AI orchestration call) carries this token; the VPS ingress verifies signature and expiry before any handler runs. Tokens are never reused past expiry — no refresh, just reissue.
+- Transport is additionally secured with mutual TLS between Vercel's egress and the VPS ingress, so a stolen/leaked JWT alone is insufficient without also presenting a valid client certificate.
+- Alternatives considered: (a) static shared secret header — rejected, no per-request expiry or scoping, a single leak compromises the channel indefinitely with no graceful rotation; (b) full OAuth2 client-credentials flow via a third-party identity provider — rejected as unnecessary latency and operational overhead for a single internal trust boundary; (c) mTLS alone with no token — rejected, provides transport trust but no claim-level scoping (job type, org context) for authorization decisions on the VPS side.
+- Security impact: bounds the lifetime of any leaked credential to 60 seconds, and requires two independently-compromised secrets (private signing key + TLS client cert) for full impersonation. Scalability impact: negligible — JWT verification is local, no added network hop. Cost impact: near-zero; reuses existing certificate infrastructure, no new paid service.
 
 ## 6. Scalability Considerations
 
 - Vercel tier scales automatically with request volume; no action needed.
-- Worker tier scales horizontally by adding queue consumers; queue depth is the scaling signal (alert + autoscale trigger in INFRASTRUCTURE.md).
+- Worker tier scales horizontally by adding queue consumers; concrete numeric thresholds are defined in INFRASTRUCTURE.md §8 (resolved decision) rather than the qualitative "queue depth" signal alone.
 - pgvector/RAG is the most likely first bottleneck as tenants grow knowledge bases — isolated as an explicit open item in DATABASE_ARCHITECTURE.md.
 
 ## 7. Failure Modes & Resilience

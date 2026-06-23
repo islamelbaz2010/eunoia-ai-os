@@ -55,9 +55,25 @@ The VPS runs these as supervised long-lived processes (e.g. via `systemd` or a p
 
 ## 8. Scaling Triggers
 
+### Resolved decision — queue scaling thresholds
+
+**Final decision: numeric, per-job-type thresholds on queue depth and oldest-pending-job age, evaluated every 30 seconds, requiring both metrics to breach for 5 consecutive minutes before autoscaling (avoids flapping on transient spikes).**
+
+| Job type | Queue depth threshold | Max oldest-job age | Action |
+|---|---|---|---|
+| AI orchestration (sync-adjacent) | > 50 pending | > 30s | Add worker instance immediately; user-facing latency, tightest threshold |
+| RAG ingestion | > 200 pending | > 5 min | Add worker instance |
+| Integration consumers (WhatsApp/Meta) | > 100 pending | > 2 min | Add worker instance |
+| Billing reconciliation / credit sweep | N/A (scheduled, not queue-driven) | run overdue > 1 cycle | Alert on-call, does not autoscale |
+
+- Alternatives considered: (a) CPU/memory-based autoscaling — rejected, doesn't reflect actual backlog (a worker can be CPU-idle while waiting on a slow AI provider call, masking a real backlog); (b) fixed worker count sized for peak — rejected, wastes cost at typical load and still has no defined ceiling for unexpected growth.
+- Recommended architecture: the table above, implemented as a scheduled check (worker tier or a small monitoring script) that reads queue depth/age directly from the job tables and triggers a new worker process via the deployment pipeline (INFRASTRUCTURE.md §10).
+- Security impact: none directly; reduces the chance that a backlog-induced slowdown leads to ad hoc, unaudited manual scaling changes under pressure. Scalability impact: gives the platform a concrete, testable autoscaling contract instead of an undefined "queue depth" signal. Cost impact: pay-for-what-you-need — workers scale down when thresholds are no longer breached (same review cadence, inverse direction), avoiding permanently over-provisioned VPS capacity.
+
+### Other scaling signals
+
 | Signal | Action |
 |---|---|
-| Queue depth sustained > threshold | Add worker instance for that job type |
 | AI provider error rate spike | Orchestration fallback to secondary provider; alert on-call |
 | Postgres connection saturation | Increase pooler limits / move heavy read paths to read replica |
 | pgvector query latency degradation | Re-evaluate dedicated vector store (see DATABASE_ARCHITECTURE.md open items) |
